@@ -306,6 +306,8 @@ impl SenderSession {
                 out.push(self.control(&ControlMessage::Welcome(Welcome {
                     pv: version::PV,
                     min: self.cfg.min_receiver_pv,
+                    // The Linux sender injects neither gestures nor keys yet.
+                    input: None,
                 })));
                 if self.receiver_pv < self.cfg.min_receiver_pv {
                     let u = self

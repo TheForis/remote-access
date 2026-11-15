@@ -2634,6 +2634,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 }
             }
+        case "gesture":
+            if let kind = obj["kind"] as? String,
+               let phase = obj["phase"] as? String,
+               let x = obj["x"] as? Double,
+               let y = obj["y"] as? Double {
+                inputInjector?.handleGesture(kind: kind, phase: phase,
+                                             delta: obj["delta"] as? Double ?? 0,
+                                             x: x, y: y)
+            }
+        case "key":
+            if let usage = (obj["usage"] as? NSNumber)?.intValue,
+               let down = obj["down"] as? Bool {
+                inputInjector?.handleKey(usage: usage, down: down)
+            }
         case "proximity":
             if let entering = obj["entering"] as? Bool,
                let x = obj["x"] as? Double,
@@ -3225,7 +3239,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Identify ourselves to the receiver: our protocol version and the oldest
     /// receiver version we still support.
     private func sendWelcome() {
-        sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
+        let inputs = InputInjector.optionalInputs.map { "\"\($0)\"" }.joined(separator: ",")
+        sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer),\"input\":[\(inputs)]}")
     }
 
     /// Announce the operating point before video. Legacy receivers ignore the

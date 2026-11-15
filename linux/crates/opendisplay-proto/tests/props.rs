@@ -43,7 +43,7 @@ proptest! {
         for m in [
             ControlMessage::Pong(Pong { t, mt }),
             ControlMessage::Cursor(Cursor { x: Some(x), y: Some(1.0 - x), v: 1, s: Some(s) }),
-            ControlMessage::Welcome(Welcome { pv: 3, min: 1 }),
+            ControlMessage::Welcome(Welcome { pv: 3, min: 1, input: None }),
             ControlMessage::Kf,
         ] {
             let p = m.to_payload().unwrap();

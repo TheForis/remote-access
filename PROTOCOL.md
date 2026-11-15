@@ -308,6 +308,8 @@ Coordinates use the conventions of section 7.
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
+| `gesture` | pv 3 (additive, negotiated) | `kind`, `phase`, `delta`, `x`, `y` | Two-finger pinch / rotation |
+| `key` | pv 3 (additive, negotiated) | `usage`, `down` | Hardware keyboard key |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
 | `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
@@ -398,6 +400,33 @@ is up is a hover move.
 to `touch` events instead. (An old sender would ignore the unknown types
 and the stylus would go dead; the fallback keeps it usable.)
 
+**`gesture`** carries `kind` (string): `"pinch"` or `"rotate"`; `phase`
+(string): `"began"`, `"changed"`, `"ended"` or `"cancelled"`; `delta`
+(number): the change **since the previous event of the same gesture** (0 on
+`"began"`): for a pinch the relative scale change (`scale_now / scale_prev
+- 1`, positive when the fingers spread), for a rotation radians,
+**counter-clockwise positive**; `x`, `y`: the normalized centroid of the
+fingers (section 7). Incremental deltas rather than a running total keep
+the message stateless for the sender, which maps them onto whatever its
+platform offers (a magnify/rotate event on macOS, a pointer-zoom on
+Windows).
+
+**`key`** carries `usage` (int): a USB HID usage ID from the
+Keyboard/Keypad page (0x07), which names the physical key independent of
+either end's layout; and `down` (bool). Modifiers are ordinary keys
+(usages 0xE0 to 0xE7), not a bitmask. A receiver MUST send `down: false`
+for every key it reported down when it loses keyboard focus, and a sender
+MUST release every key still down when the session ends, since a cut
+connection delivers no key-up and a stuck modifier makes the desktop
+unusable. Senders MUST ignore usages they cannot map.
+
+**Optional-input negotiation (normative):** a receiver MUST NOT send
+`gesture` or `key` unless the sender's `welcome.input` (section 6.2) lists
+that type. Without it, the receiver keeps its legacy behavior (a
+two-finger gesture is a `scroll`; keys are not forwarded). An older sender
+would ignore the unknown types and the gesture would go dead, which is the
+same reasoning as the pencil fallback above.
+
 **`stats`** is free-form telemetry the sender only logs, so both ends stay
 diagnosable from one log file. The official receiver sends it every ~5 s
 with fields like `transport`, `fps`, `mbps`, `e2e50`, `e2e95`, `enc50`,
@@ -422,7 +451,7 @@ section 4.
 | `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`? | Liveness + sender health |
 | `cursor` | pv 1 | `x`?, `y`?, `v` | Cursor position/visibility |
 | `cursorImg` | pv 1 | `nw`, `nh`, `ax`, `ay`, `png` | Cursor sprite |
-| `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
+| `welcome` | pv 2 | `pv`, `min`, `input`? | Sender's side of the version handshake |
 | `updateRequired` | pv 2 | `target`, `store`, `message` | Peer must update to continue |
 | `streamConfig` | pv 3 (additive) | `codec`, `width`, `height`, `framesPerSecond` | Selected video operating point |
 | `power` | pv 3 (additive) | `action` | Ask the receiver to power off (6.6) |
@@ -439,6 +468,11 @@ by `encDrops`), `pending` (in-flight sends), `inp50`/`inp95` (input latency
 percentiles, ms), `capFps` (capture rate). All fields optional,
 informational only. Note the asymmetry: the receiver's `ping` solicits a
 `pong`; the sender's does not.
+
+**`welcome.input`** (array of strings, optional, additive at `pv` 3): the
+optional input message types this sender can inject, from `"gesture"` and
+`"key"` (section 6.1). Absent means none. Receivers MUST ignore entries
+they do not know.
 
 **`cursor`**: `v` is 1 (visible) or 0 (hidden). When visible, `x`, `y`
 give the normalized position (section 7); when hidden they MAY be absent.

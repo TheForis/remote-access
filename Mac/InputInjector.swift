@@ -113,6 +113,93 @@ final class InputInjector {
         event.post(tap: .cghidEventTap)
     }
 
+    // MARK: - Gestures and keys (PROTOCOL.md 6.1, negotiated via welcome.input)
+
+    /// Optional input types this injector accepts; advertised in `welcome.input`.
+    static let optionalInputs = ["gesture", "key"]
+
+    private var keysDown = Set<CGKeyCode>()
+
+    deinit { releaseAllKeys() }
+
+    /// Pinch / rotation as the gesture events a trackpad produces. There is no
+    /// public API to create these: the event type and fields below are the
+    /// undocumented ones other injectors use (NSEventTypeGesture = 29, HID
+    /// event type in field 110, value in 113, phase in 132), so a macOS update
+    /// can break them. `delta` is incremental, like NSEvent.magnification.
+    func handleGesture(kind: String, phase: String, delta: Double, x: Double, y: Double) {
+        let hidType: Int64
+        let value: Double
+        switch kind {
+        case "pinch":
+            hidType = 8                    // kIOHIDEventTypeZoom
+            value = delta
+        case "rotate":
+            hidType = 5                    // kIOHIDEventTypeRotation
+            value = delta * 180 / .pi      // AppKit wants degrees, CCW positive
+        default:
+            return
+        }
+        let gesturePhase: Int64
+        switch phase {
+        case "began": gesturePhase = 1
+        case "changed": gesturePhase = 2
+        case "ended": gesturePhase = 4
+        case "cancelled": gesturePhase = 8
+        default: return
+        }
+        let point = screenPoint(nx: x, ny: y)
+        // Gestures go to the window under the cursor; put it on the fingers
+        // once, at the start (see the two-finger scroll on the receiver).
+        if phase == "began", !isDown,
+           let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                              mouseCursorPosition: point, mouseButton: .left) {
+            move.post(tap: .cghidEventTap)
+        }
+        guard let type = CGEventType(rawValue: 29),
+              let typeField = CGEventField(rawValue: 110),
+              let valueField = CGEventField(rawValue: 113),
+              let phaseField = CGEventField(rawValue: 132),
+              let event = CGEvent(source: source) else { return }
+        event.type = type
+        event.location = point
+        event.setIntegerValueField(typeField, value: hidType)
+        event.setDoubleValueField(valueField, value: value)
+        event.setIntegerValueField(phaseField, value: gesturePhase)
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// One hardware key from the receiver. `usage` is a USB HID keyboard usage.
+    func handleKey(usage: Int, down: Bool) {
+        guard let key = HIDKeyMap.virtualKey(forUsage: usage) else { return }
+        if down {
+            keysDown.insert(key)
+        } else if keysDown.remove(key) == nil {
+            return   // an up for a key we never pressed
+        }
+        postKey(key, down: down)
+    }
+
+    /// A cut connection delivers no key-up; never leave a key (above all a
+    /// modifier) held on the Mac.
+    func releaseAllKeys() {
+        let held = keysDown
+        keysDown.removeAll()
+        for key in held { postKey(key, down: false) }
+    }
+
+    private func postKey(_ key: CGKeyCode, down: Bool) {
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: key,
+                                  keyDown: down) else { return }
+        var flags: CGEventFlags = []
+        for held in keysDown {
+            if let flag = HIDKeyMap.modifierFlag(forVirtualKey: held) { flags.insert(flag) }
+        }
+        if HIDKeyMap.modifierFlag(forVirtualKey: key) != nil { event.type = .flagsChanged }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
     /// Scroll events take points, so convert via the display's pixel scale.
     func handleScroll(dx: Double, dy: Double) {

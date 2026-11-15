@@ -374,6 +374,50 @@ pub struct Proximity {
     pub y: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GestureKind {
+    Pinch,
+    Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GesturePhase {
+    Began,
+    Changed,
+    Ended,
+    Cancelled,
+}
+
+/// `gesture` (§6.1): a two-finger pinch or rotation. `delta` is the change
+/// since the previous event of this gesture (pinch: relative scale change,
+/// rotate: radians, counter-clockwise positive); `x`, `y` the normalised
+/// centroid. Only sent to senders whose `welcome.input` lists `"gesture"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gesture {
+    pub kind: GestureKind,
+    pub phase: GesturePhase,
+    #[serde(default)]
+    pub delta: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// `key` (§6.1): one hardware key going down or up. `usage` is a USB HID
+/// Keyboard/Keypad page (0x07) usage ID; modifiers are ordinary keys
+/// (0xE0..=0xE7). Only sent to senders whose `welcome.input` lists `"key"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Key {
+    #[serde(deserialize_with = "lenient_u32")]
+    pub usage: u32,
+    pub down: bool,
+}
+
+/// Values of `welcome.input` (§6.2) this implementation knows.
+pub const INPUT_GESTURE: &str = "gesture";
+pub const INPUT_KEY: &str = "key";
+
 /// `cursor` (§6.2, §6.3): `v` 1 visible / 0 hidden; `s` is the side-channel
 /// sequence number, absent from older senders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -416,6 +460,20 @@ pub struct Welcome {
     pub pv: u32,
     #[serde(deserialize_with = "lenient_u32")]
     pub min: u32,
+    /// Optional input message types the sender can inject (`"gesture"`,
+    /// `"key"`). Absent from senders that predate them; unknown entries are
+    /// ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Vec<String>>,
+}
+
+impl Welcome {
+    /// Whether the sender accepts the optional input type `kind`.
+    pub fn accepts_input(&self, kind: &str) -> bool {
+        self.input
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|s| s == kind))
+    }
 }
 
 /// `updateRequired` (§6.2).
@@ -460,6 +518,10 @@ pub enum ControlMessage {
     Pencil(Pencil),
     #[serde(rename = "proximity")]
     Proximity(Proximity),
+    #[serde(rename = "gesture")]
+    Gesture(Gesture),
+    #[serde(rename = "key")]
+    Key(Key),
     #[serde(rename = "kf")]
     Kf,
     #[serde(rename = "stats")]
@@ -520,6 +582,8 @@ impl ControlMessage {
             ControlMessage::Scroll(_) => "scroll",
             ControlMessage::Pencil(_) => "pencil",
             ControlMessage::Proximity(_) => "proximity",
+            ControlMessage::Gesture(_) => "gesture",
+            ControlMessage::Key(_) => "key",
             ControlMessage::Kf => "kf",
             ControlMessage::Stats(_) => "stats",
             ControlMessage::Sleeping => "sleeping",
@@ -564,6 +628,8 @@ fn is_known_type(kind: &str) -> bool {
             | "scroll"
             | "pencil"
             | "proximity"
+            | "gesture"
+            | "key"
             | "kf"
             | "stats"
             | "sleeping"
@@ -754,9 +820,13 @@ mod tests {
 
     #[test]
     fn serialises_with_type_tag_and_camel_case() {
-        let p = ControlMessage::Welcome(Welcome { pv: 3, min: 1 })
-            .to_payload()
-            .unwrap();
+        let p = ControlMessage::Welcome(Welcome {
+            pv: 3,
+            min: 1,
+            input: None,
+        })
+        .to_payload()
+        .unwrap();
         assert_eq!(p, br#"{"type":"welcome","pv":3,"min":1}"#);
         let p = ControlMessage::Kf.to_payload().unwrap();
         assert_eq!(p, br#"{"type":"kf"}"#);
@@ -836,6 +906,22 @@ mod tests {
                 x: 0.5,
                 y: 0.5,
             }),
+            ControlMessage::Gesture(Gesture {
+                kind: GestureKind::Pinch,
+                phase: GesturePhase::Changed,
+                delta: -0.04,
+                x: 0.5,
+                y: 0.25,
+            }),
+            ControlMessage::Key(Key {
+                usage: 0xE3,
+                down: true,
+            }),
+            ControlMessage::Welcome(Welcome {
+                pv: 3,
+                min: 1,
+                input: Some(vec![INPUT_GESTURE.into(), INPUT_KEY.into()]),
+            }),
             ControlMessage::Stats(serde_json::json!({"fps": 60, "transport": "wifi"})),
             ControlMessage::Sleeping,
             ControlMessage::Closing,
@@ -855,5 +941,66 @@ mod tests {
                 String::from_utf8_lossy(&p)
             );
         }
+    }
+
+    #[test]
+    fn gesture_and_key_wire_shape() {
+        let g = ControlMessage::Gesture(Gesture {
+            kind: GestureKind::Rotate,
+            phase: GesturePhase::Began,
+            delta: 0.0,
+            x: 0.5,
+            y: 0.5,
+        })
+        .to_payload()
+        .unwrap();
+        assert_eq!(
+            g,
+            br#"{"type":"gesture","kind":"rotate","phase":"began","delta":0.0,"x":0.5,"y":0.5}"#
+        );
+        let k = ControlMessage::Key(Key {
+            usage: 4,
+            down: false,
+        })
+        .to_payload()
+        .unwrap();
+        assert_eq!(k, br#"{"type":"key","usage":4,"down":false}"#);
+        // Swift's JSONSerialization may write the usage as a float.
+        assert_eq!(
+            ControlMessage::parse(br#"{"type":"key","usage":224.0,"down":true}"#).unwrap(),
+            ControlMessage::Key(Key {
+                usage: 224,
+                down: true
+            })
+        );
+    }
+
+    #[test]
+    fn gesture_of_an_unknown_kind_is_malformed_not_fatal() {
+        let r = ControlMessage::parse(
+            br#"{"type":"gesture","kind":"swipe","phase":"began","x":0,"y":0}"#,
+        );
+        assert!(matches!(r, Err(ControlError::Malformed { .. })));
+    }
+
+    #[test]
+    fn welcome_input_is_optional_and_tolerates_unknown_entries() {
+        let old = ControlMessage::parse(br#"{"type":"welcome","pv":3,"min":1}"#).unwrap();
+        let ControlMessage::Welcome(old) = old else {
+            panic!()
+        };
+        assert!(!old.accepts_input(INPUT_GESTURE));
+        let new = ControlMessage::parse(
+            br#"{"type":"welcome","pv":3,"min":1,"input":["key","somethingNewer"]}"#,
+        )
+        .unwrap();
+        let ControlMessage::Welcome(new) = new else {
+            panic!()
+        };
+        assert!(new.accepts_input(INPUT_KEY));
+        assert!(!new.accepts_input(INPUT_GESTURE));
+        // An old-style welcome still serialises byte-for-byte as before.
+        let p = ControlMessage::Welcome(old).to_payload().unwrap();
+        assert_eq!(p, br#"{"type":"welcome","pv":3,"min":1}"#);
     }
 }

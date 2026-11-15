@@ -78,6 +78,12 @@ final class StreamReceiver: ObservableObject {
     @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
 
     /// True when the connected Mac understands pencil/proximity wire messages.
+    /// Optional input types the sender said it can inject (`welcome.input`,
+    /// PROTOCOL.md 6.2). Empty for senders that predate them.
+    @Published private(set) var senderInputs: Set<String> = []
+    var senderAcceptsGestures: Bool { senderInputs.contains("gesture") }
+    var senderAcceptsKeys: Bool { senderInputs.contains("key") }
+
     var macSupportsPencilWire: Bool { macProtocolVersion >= WireProtocol.pencilWireVersion }
 
     private var listener: NWListener?
@@ -845,8 +851,10 @@ final class StreamReceiver: ObservableObject {
             // older than we support, it's the Mac that needs updating — and an
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
+            let inputs = Set(obj["input"] as? [String] ?? [])
             DispatchQueue.main.async {
                 self.macProtocolVersion = macPV
+                self.senderInputs = inputs
             }
             if macPV < WireProtocol.minSupportedPeer {
                 let msg = "OpenDisplay on the connecting computer is too old for this \(deviceKind) app. Update it there to reconnect."
@@ -1059,6 +1067,20 @@ final class StreamReceiver: ObservableObject {
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
         sendControl(msg)
+    }
+
+    /// Pinch / rotation. `delta` is the change since the previous event:
+    /// relative scale for a pinch, radians (CCW positive) for a rotation.
+    /// Callers check `senderAcceptsGestures` first (PROTOCOL.md 6.1).
+    func sendGesture(kind: String, phase: String, delta: Double, x: Double, y: Double) {
+        sendControl(["type": "gesture", "kind": kind, "phase": phase,
+                     "delta": delta, "x": x, "y": y])
+    }
+
+    /// Hardware key, as a USB HID keyboard usage. Callers check
+    /// `senderAcceptsKeys` first.
+    func sendKey(usage: Int, down: Bool) {
+        sendControl(["type": "key", "usage": usage, "down": down])
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
@@ -1576,6 +1598,7 @@ final class StreamReceiver: ObservableObject {
             self.connected = value
             if !value {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
+                self.senderInputs = []
             }
         }
         if !value { setStatus("Ready to connect") }

@@ -813,7 +813,17 @@ struct VideoLayerView: UIViewRepresentable {
         let pan = UIPanGestureRecognizer(target: view, action: #selector(VideoView.didTwoFingerPan(_:)))
         pan.minimumNumberOfTouches = 2
         pan.maximumNumberOfTouches = 2
+        pan.delegate = view
         view.addGestureRecognizer(pan)
+
+        // Pinch and rotation run alongside the scroll, as on a trackpad; they
+        // only reach the wire when the sender said it can inject them.
+        let pinch = UIPinchGestureRecognizer(target: view, action: #selector(VideoView.didPinch(_:)))
+        pinch.delegate = view
+        view.addGestureRecognizer(pinch)
+        let rotate = UIRotationGestureRecognizer(target: view, action: #selector(VideoView.didRotate(_:)))
+        rotate.delegate = view
+        view.addGestureRecognizer(rotate)
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -839,7 +849,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
-    final class VideoView: UIView {
+    final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
@@ -1029,6 +1039,106 @@ struct VideoLayerView: UIViewRepresentable {
         private var twoFingerActive = false
         private var lastPan = CGPoint.zero
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
+
+        // MARK: Pinch / rotation (PROTOCOL.md 6.1 `gesture`)
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        private var lastPinchScale: CGFloat = 1
+        private var lastRotation: CGFloat = 0
+
+        private func gesturePhase(_ state: UIGestureRecognizer.State) -> String? {
+            switch state {
+            case .began: return "began"
+            case .changed: return "changed"
+            case .ended: return "ended"
+            case .cancelled, .failed: return "cancelled"
+            default: return nil
+            }
+        }
+
+        @objc func didPinch(_ recognizer: UIPinchGestureRecognizer) {
+            guard let receiver, receiver.senderAcceptsGestures,
+                  let phase = gesturePhase(recognizer.state) else { return }
+            if recognizer.state == .began { lastPinchScale = 1 }
+            let scale = recognizer.scale
+            let delta = (recognizer.state == .changed && lastPinchScale > 0)
+                ? Double(scale / lastPinchScale - 1) : 0
+            lastPinchScale = scale
+            let n = normalized(recognizer.location(in: self)) ?? lastNorm
+            receiver.sendGesture(kind: "pinch", phase: phase, delta: delta, x: n.x, y: n.y)
+        }
+
+        @objc func didRotate(_ recognizer: UIRotationGestureRecognizer) {
+            guard let receiver, receiver.senderAcceptsGestures,
+                  let phase = gesturePhase(recognizer.state) else { return }
+            if recognizer.state == .began { lastRotation = 0 }
+            let rotation = recognizer.rotation
+            // UIKit counts clockwise as positive; the wire is CCW positive.
+            let delta = recognizer.state == .changed ? -Double(rotation - lastRotation) : 0
+            lastRotation = rotation
+            let n = normalized(recognizer.location(in: self)) ?? lastNorm
+            receiver.sendGesture(kind: "rotate", phase: phase, delta: delta, x: n.x, y: n.y)
+        }
+
+        // MARK: Hardware keyboard (PROTOCOL.md 6.1 `key`)
+
+        private var keysDown = Set<Int>()
+
+        override var canBecomeFirstResponder: Bool { true }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window != nil { becomeFirstResponder() } else { releaseAllKeys() }
+        }
+
+        @discardableResult
+        override func resignFirstResponder() -> Bool {
+            releaseAllKeys()
+            return super.resignFirstResponder()
+        }
+
+        /// The sender cannot see a key-up we never send (focus lost, app
+        /// backgrounded), so release everything we reported down.
+        func releaseAllKeys() {
+            for usage in keysDown { receiver?.sendKey(usage: usage, down: false) }
+            keysDown.removeAll()
+        }
+
+        /// Returns the presses we did not forward, for the responder chain.
+        private func forward(_ presses: Set<UIPress>, down: Bool) -> Set<UIPress> {
+            guard let receiver, receiver.senderAcceptsKeys else { return presses }
+            var unhandled = Set<UIPress>()
+            for press in presses {
+                guard let key = press.key else { unhandled.insert(press); continue }
+                let usage = key.keyCode.rawValue
+                if down {
+                    keysDown.insert(usage)
+                    receiver.sendKey(usage: usage, down: true)
+                } else if keysDown.remove(usage) != nil {
+                    receiver.sendKey(usage: usage, down: false)
+                }
+            }
+            return unhandled
+        }
+
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = forward(presses, down: true)
+            if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+        }
+
+        override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = forward(presses, down: false)
+            if !rest.isEmpty { super.pressesEnded(rest, with: event) }
+        }
+
+        override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = forward(presses, down: false)
+            if !rest.isEmpty { super.pressesCancelled(rest, with: event) }
+        }
 
         @objc func didTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
             guard let video = receiver?.videoSize, video != .zero else { return }
